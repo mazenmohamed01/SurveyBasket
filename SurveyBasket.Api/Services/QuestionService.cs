@@ -3,10 +3,11 @@ using SurveyBasket.Api.Contracts.Questions;
 
 namespace SurveyBasket.Api.Services;
 
-public class QuestionService(AppDbContext context) : IQuestionService
+public class QuestionService(AppDbContext context,ICashService cashService) : IQuestionService
 {
     private readonly AppDbContext _context = context;
-
+    private readonly ICashService _cashService = cashService;
+    private const string _cashPrefix = "poll_questions_";
 
     public async Task<Result<IEnumerable<QuestionResponse>>> GetAllAsync(int pollId, CancellationToken cancellationToken = default)
     {
@@ -36,18 +37,34 @@ public class QuestionService(AppDbContext context) : IQuestionService
         if (!pollIsExist)
             return Result.Failure<IEnumerable<QuestionResponse>>(PollErrors.PollNotFound); // Poll not found
 
-        var questions = await _context.Questions.Where(q => q.PollId==pollId && q.IsActive)
-            .Include(q => q.Answers)
-            .Select(q => new QuestionResponse
-            (
-                q.Id,
-                q.Content,
-                q.Answers.Where(a => a.IsActive).Select(a => new AnswerResponse(a.Id, a.Content))
-            ))
-            .AsNoTracking()
-            .ToListAsync(cancellationToken);
+        //add_cash
+        var cashKey = $"{_cashPrefix}-{pollId}";
 
-        return Result.Success<IEnumerable<QuestionResponse>>(questions);
+        var cachedQuestions = await _cashService.GetAsync<IEnumerable<QuestionResponse>>(cashKey, cancellationToken);
+
+        IEnumerable<QuestionResponse> questions = [];
+
+        if(cachedQuestions is not null)
+        {
+            questions = cachedQuestions;
+        }
+        else
+        {
+            questions = await _context.Questions.Where(q => q.PollId == pollId && q.IsActive)
+                .Include(q => q.Answers)
+                .Select(q => new QuestionResponse
+                (
+                    q.Id,
+                    q.Content,
+                    q.Answers.Where(a => a.IsActive).Select(a => new AnswerResponse(a.Id, a.Content))
+                ))
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
+
+            await _cashService.SetAsync(cashKey, questions, cancellationToken);
+        }
+        
+        return Result.Success(questions!);
 
     }
 
@@ -82,6 +99,8 @@ public class QuestionService(AppDbContext context) : IQuestionService
 
         await _context.AddAsync(newQuestion, cancellationToken);
         await _context.SaveChangesAsync(cancellationToken);
+
+        await _cashService.RemoveAsync($"{_cashPrefix}-{pollId}", cancellationToken);
 
         return Result.Success(newQuestion.Adapt<QuestionResponse>());
     }
@@ -121,6 +140,9 @@ public class QuestionService(AppDbContext context) : IQuestionService
         });
             
         await _context.SaveChangesAsync(cancellationToken);
+
+        await _cashService.RemoveAsync($"{_cashPrefix}-{pollId}", cancellationToken);
+
         return Result.Success();
     }
 
@@ -137,6 +159,7 @@ public class QuestionService(AppDbContext context) : IQuestionService
         question.IsActive = !question.IsActive; // Toggle the status
 
         await _context.SaveChangesAsync(cancellationToken);
+        await _cashService.RemoveAsync($"{_cashPrefix}-{pollId}", cancellationToken);
         return Result.Success();
     }
 
